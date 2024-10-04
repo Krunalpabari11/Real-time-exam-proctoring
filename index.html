@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Face Detection WebSocket Client</title>
+    <style>
+        #videoFeed {
+            max-width: 100%;
+            height: auto;
+        }
+    </style>
+</head>
+<body>
+    <h1>Face Detection WebSocket Client</h1>
+    <div id="status">Connecting...</div>
+    <img id="videoFeed" alt="Video Feed">
+    <div id="faceData"></div>
+
+    <script>
+        const socket = new WebSocket('ws://localhost:8765');
+        const videoFeed = document.getElementById('videoFeed');
+
+        socket.onopen = function(e) {
+            document.getElementById('status').innerHTML = 'Connected to WebSocket server';
+        };
+
+        socket.onmessage = function(event) {
+            const data = JSON.parse(event.data);
+            
+            // Update video feed
+            videoFeed.src = 'data:image/jpeg;base64,' + data.image;
+
+            let faceDataHtml = `
+                <p>Status: ${data.status}</p>
+                <p>Warning Count: ${data.warningCount}</p>
+                <p>Faces Detected: ${data.faces.length}</p>
+            `;
+            if (data.faces.length > 0) {
+                faceDataHtml += '<ul>';
+                data.faces.forEach((face, index) => {
+                    faceDataHtml += `<li>Face ${index + 1}: (${face[0]}, ${face[1]}, ${face[2]}, ${face[3]})</li>`;
+                });
+                faceDataHtml += '</ul>';
+            }
+            document.getElementById('faceData').innerHTML = faceDataHtml;
+        };
+
+        socket.onclose = function(event) {
+            if (event.wasClean) {
+                document.getElementById('status').innerHTML = `Closed cleanly, code=${event.code}, reason=${event.reason}`;
+            } else {
+                document.getElementById('status').innerHTML = 'Connection died';
+            }
+        };
+
+        socket.onerror = function(error) {
+            document.getElementById('status').innerHTML = `Error: ${error.message}`;
+        };
+    </script>
+</body>
+</html>

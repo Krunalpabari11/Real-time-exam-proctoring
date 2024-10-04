@@ -2,6 +2,10 @@ import cv2
 import numpy as np
 import time
 import os
+import asyncio
+import websockets
+import json
+import base64
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 model_path = os.path.join(current_dir, "face_detection_yunet_2023mar.onnx")
@@ -12,7 +16,6 @@ if not os.path.isfile(model_path):
 print(f"OpenCV version: {cv2.__version__}")
 
 try:
-    # Adjusted parameters: lowered score threshold to 0.7 and increased NMS threshold to 0.5
     face_detector = cv2.FaceDetectorYN.create(
         model_path, "", (320, 320), 0.7, 0.5, 5000
     )
@@ -21,19 +24,10 @@ except Exception as e:
     print(f"Error loading YuNet model: {e}")
     raise
 
-video_cap = cv2.VideoCapture(0)
-
-initial_delay = 5
+initial_delay = 0
 warning_delay = 3
 max_warnings = 2
 face_check_interval = 0
-
-start_time = time.time()
-last_check_time = start_time
-warning_count = 0
-last_warning_time = start_time - warning_delay
-
-print("Initializing camera...")
 
 def detect_faces(frame):
     try:
@@ -48,53 +42,93 @@ def detect_faces(frame):
         print(f"Error in detect_faces: {e}")    
         return []
 
-while True:
-    ret, frame = video_cap.read()
-    if not ret:
-        print("Failed to capture frame. Retrying...")
-        continue
+async def send_face_data(websocket, path):
+    video_cap = cv2.VideoCapture(0)
+    
+    start_time = time.time()
+    last_check_time = start_time
+    warning_count = 0
+    last_warning_time = start_time - warning_delay
 
-    current_time = time.time()
-    elapsed_time = current_time - start_time
+    print("Initializing camera...")
 
-    if elapsed_time < initial_delay:
-        cv2.putText(frame, f"Starting in: {int(initial_delay - elapsed_time)}s", (10, 30), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-    else:
-        if current_time - last_check_time >= face_check_interval:
-            last_check_time = current_time
-            
-            faces = detect_faces(frame)
+    try:
+        while True:
+            try:
+                ret, frame = video_cap.read()
+                if not ret:
+                    print("Failed to capture frame. Retrying...")
+                    await asyncio.sleep(1)
+                    continue
 
-            if len(faces) == 0:
-                if current_time - last_warning_time >= warning_delay:
-                    warning_count += 1
-                    last_warning_time = current_time
-                    print(f"Warning {warning_count}: No face detected!")
-                    cv2.putText(frame, f"Warning: No face detected!", (10, 30), 
-                                cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-            elif len(faces) > 1:
-                if current_time - last_warning_time >= warning_delay:
-                    warning_count += 1
-                    last_warning_time = current_time
-                    print(f"Warning {warning_count}: Multiple faces detected!")
-                    cv2.putText(frame, f"Warning: Multiple faces detected!", (10, 30), 
-                                cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-            else:
-                warning_count = 0
-                cv2.putText(frame, "Face detected", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                current_time = time.time()
+                elapsed_time = current_time - start_time
 
-            for (x, y, w, h) in faces:
-                cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
+                if elapsed_time < initial_delay:
+                    status = f"Starting in: {int(initial_delay - elapsed_time)}s"
+                else:
+                    if current_time - last_check_time >= face_check_interval:
+                        last_check_time = current_time
+                        
+                        faces = detect_faces(frame)
 
-        if warning_count > max_warnings:
-            print("Exam terminated: Too many warnings.")
-            break
+                        if len(faces) == 0:
+                            if current_time - last_warning_time >= warning_delay:
+                                warning_count += 1
+                                last_warning_time = current_time
+                                status = f"Warning {warning_count}: No face detected!"
+                        elif len(faces) > 1:
+                            if current_time - last_warning_time >= warning_delay:
+                                warning_count += 1
+                                last_warning_time = current_time
+                                status = f"Warning {warning_count}: Multiple faces detected!"
+                        else:
 
-    cv2.imshow('Exam Monitoring', frame)
+                            status = "Face detected"
 
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
+                        # Draw rectangles around detected faces
+                        for (x, y, w, h) in faces:
+                            cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
 
-video_cap.release()
-cv2.destroyAllWindows()
+                        # Convert frame to JPEG
+                        _, buffer = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 50])
+                        # Convert to base64 encoding
+                        jpg_as_text = base64.b64encode(buffer).decode('utf-8')
+
+                        # Prepare data to send via WebSocket
+                        data = {
+                            "image": jpg_as_text,
+                            "faces": faces,
+                            "status": status,
+                            "warningCount": warning_count
+                        }
+
+                        # Send data via WebSocket
+                        await websocket.send(json.dumps(data))
+
+                    if warning_count > max_warnings:
+                        print("Exam terminated: Too many warnings.")
+                        break
+
+                await asyncio.sleep(0)  
+
+            except websockets.exceptions.ConnectionClosed:
+                print("WebSocket connection closed. Waiting for new connection...")
+                break
+
+    finally:
+        video_cap.release()
+
+async def main():
+    while True:
+        try:
+            server = await websockets.serve(send_face_data, "localhost", 8765)
+            print("WebSocket server started on ws://localhost:8765")
+            await server.wait_closed()
+        except Exception as e:
+            print(f"Error in WebSocket server: {e}")
+            print("Restarting server in 5 seconds...")
+            await asyncio.sleep(5)
+
+if __name__ == "__main__":
+    asyncio.run(main())

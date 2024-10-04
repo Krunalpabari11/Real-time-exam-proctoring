@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Face Recognition WebSocket Client</title>
+    <style>
+        body { font-family: Arial, sans-serif; text-align: center; }
+        #videoFeed { max-width: 100%; height: auto; }
+        #status { margin-top: 20px; }
+    </style>
+</head>
+<body>
+    <h1>Face Recognition WebSocket Client</h1>
+    <input type="text" id="command" placeholder="Enter command (new_face or recognize)">
+    <input type="text" id="username" placeholder="Enter username">
+    <button onclick="startRecognition()">Start Recognition</button>
+    <button onclick="captureFace()" id="shutterButton" style="display: none;">Capture Face</button>
+    <div>
+        <img id="videoFeed" alt="Video Feed">
+    </div>
+    <div id="status"></div>
+
+    <script>
+        let socket;
+        const videoFeed = document.getElementById('videoFeed');
+        const statusDiv = document.getElementById('status');
+        const shutterButton = document.getElementById('shutterButton');
+
+        function startRecognition() {
+            const username = document.getElementById('username').value;
+            const command = document.getElementById('command').value;
+
+            if (!username || (command !== 'new_face' && command !== 'recognize')) {
+                alert('Please enter a valid command (new_face or recognize) and a username');
+                return;
+            }
+
+            socket = new WebSocket('ws://localhost:8766');
+
+            socket.onopen = function(event) {
+                console.log('WebSocket connection opened');
+                socket.send(JSON.stringify({command: command, username: username}));
+                if (command === 'new_face') {
+                    shutterButton.style.display = 'block';
+                }
+            };
+
+            socket.onmessage = function(event) {
+                const data = JSON.parse(event.data);
+                if (data.image) {
+                    videoFeed.src = 'data:image/jpeg;base64,' + data.image;
+                } else if (data.match !== undefined) {
+                    if (data.match) {
+                        statusDiv.innerHTML = `<strong>Match found for ${data.name}!</strong>`;
+                    } else {
+                        statusDiv.innerHTML = `Face detected, but matched with ${data.detected_name} instead of ${username}`;
+                    }
+                    if (command === 'new_face') {
+                        shutterButton.style.display = 'none';
+                    }
+                } else if (data.error) {
+                    statusDiv.innerHTML = `Error: ${data.error}`;
+                }
+            };
+
+            socket.onclose = function(event) {
+                console.log('WebSocket connection closed');
+                statusDiv.innerHTML = 'WebSocket connection closed';
+                shutterButton.style.display = 'none';
+            };
+
+            socket.onerror = function(error) {
+                console.error('WebSocket error:', error);
+                statusDiv.innerHTML = 'WebSocket error occurred';
+            };
+        }
+
+        function captureFace() {
+            if (socket && socket.readyState === WebSocket.OPEN) {
+                socket.send(JSON.stringify({command: 'capture'}));
+                statusDiv.innerHTML = 'Capturing face...';
+            } else {
+                alert('WebSocket is not open');
+            }
+        }
+    </script>
+</body>
+</html>
