@@ -13,9 +13,9 @@ class FaceRecognition:
         self.known_faces_names = []
         self.known_faces_coordinates = []
         self.data_file = 'face_data.txt'
-        self.tolerance = 0.25
+        self.tolerance = 0.25 # Adjusted tolerance for better accuracy
         self.executor = ThreadPoolExecutor(max_workers=4)
-        self.frame_skip = 2
+        self.frame_skip = 0
         self.frame_count = 0
         
         # Load face detection model
@@ -42,14 +42,11 @@ class FaceRecognition:
                     
                     for line in file:
                         try:
-                            # Split by the delimiter we use in save_to_file
                             parts = line.strip().split('|')
-                            if len(parts) == 3:  # Ensure we have all three components
+                            if len(parts) == 3:
                                 name = parts[0]
                                 encoding = np.fromstring(parts[1], sep=',')
                                 coords = np.fromstring(parts[2], sep=',')
-                                
-                                # Only add if the data seems valid
                                 if len(encoding) > 0 and len(coords) > 0:
                                     self.known_faces_names.append(name)
                                     self.known_faces_encodings.append(encoding)
@@ -59,11 +56,9 @@ class FaceRecognition:
                         except Exception as e:
                             print(f"Error processing line: {e}")
                             continue
-                
                 print(f"Successfully loaded {len(self.known_faces_names)} faces")
             except Exception as e:
                 print(f"Error loading faces: {e}")
-                # Create empty file if doesn't exist or corrupted
                 open(self.data_file, 'w').close()
         else:
             print("No face data file found. Creating new one.")
@@ -73,15 +68,11 @@ class FaceRecognition:
         try:
             with open(self.data_file, 'w') as file:
                 for name, encoding, coords in zip(self.known_faces_names, 
-                                               self.known_faces_encodings, 
-                                               self.known_faces_coordinates):
-                    # Convert numpy arrays to strings without brackets
+                                                   self.known_faces_encodings, 
+                                                   self.known_faces_coordinates):
                     encoding_str = ','.join(map(str, encoding))
                     coords_str = ','.join(map(str, coords))
-                    
-                    # Save in format: name|encoding|coordinates
                     file.write(f"{name}|{encoding_str}|{coords_str}\n")
-            
             print(f"Successfully saved {len(self.known_faces_names)} faces to {self.data_file}")
         except Exception as e:
             print(f"Error saving faces: {e}")
@@ -94,44 +85,31 @@ class FaceRecognition:
             if faces is not None:
                 return faces, "YuNet"
         
-        # Fallback to Haar Cascade
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        faces = self.face_cascade.detectMultiScale(gray, 
-                                                 scaleFactor=1.1, 
-                                                 minNeighbors=5, 
-                                                 minSize=(30, 30))
+        faces = self.face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
         return faces, "Haar Cascade"
 
     def encode_face(self, frame, face):
-        if len(face) == 4:  # Haar Cascade output
+        if len(face) == 4:
             x, y, w, h = face
-        else:  # YuNet output
+        else:
             x, y, w, h = map(int, face[:4])
 
-        # Extract face ROI
         face_roi = frame[y:y+h, x:x+w]
-        
-        # Convert to grayscale
         gray_face = cv2.cvtColor(face_roi, cv2.COLOR_BGR2GRAY)
-        
-        # Resize to fixed size
         resized_face = cv2.resize(gray_face, (64, 64))
-        
-        # Flatten and normalize
         face_encoding = resized_face.flatten()
         face_encoding = face_encoding / np.linalg.norm(face_encoding)
-        
         return face_encoding
 
     def draw_face_boxes(self, frame, faces, names=None):
         for i, face in enumerate(faces):
-            if len(face) == 4:  # Haar Cascade output
+            if len(face) == 4:
                 x, y, w, h = face
-            else:  # YuNet output
+            else:
                 x, y, w, h = map(int, face[:4])
             
             cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
-            
             if names and i < len(names):
                 name = names[i]
                 cv2.putText(frame, name, (x, y - 10),
@@ -139,82 +117,14 @@ class FaceRecognition:
         return frame
 
     async def process_frame(self, frame):
-        faces, method = await asyncio.get_event_loop().run_in_executor(
-            self.executor, self.detect_faces, frame)
+        faces, method = await asyncio.get_event_loop().run_in_executor(self.executor, self.detect_faces, frame)
         
         face_encodings = []
         for face in faces:
-            encoding = await asyncio.get_event_loop().run_in_executor(
-                self.executor, self.encode_face, frame, face)
+            encoding = await asyncio.get_event_loop().run_in_executor(self.executor, self.encode_face, frame, face)
             face_encodings.append(encoding)
             
         return faces, face_encodings, method
-
-    async def save_new_face(self, websocket, name):
-        print(f"Starting face capture for {name}...")
-        video_capture = cv2.VideoCapture(0)
-        video_capture.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        video_capture.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-
-        try:
-            capture_requested = False
-            while True:
-                ret, frame = video_capture.read()
-                if not ret:
-                    await websocket.send(json.dumps({"error": "Failed to capture image"}))
-                    continue
-
-                faces, face_encodings, method = await self.process_frame(frame)
-                
-                frame_with_boxes = self.draw_face_boxes(frame.copy(), faces)
-                _, jpeg_frame = cv2.imencode('.jpg', frame_with_boxes, 
-                                           [cv2.IMWRITE_JPEG_QUALITY, 70])
-                jpeg_base64 = base64.b64encode(jpeg_frame).decode('utf-8')
-                
-                await websocket.send(json.dumps({
-                    "image": jpeg_base64,
-                    "debug_info": f"Detected {len(faces)} faces using {method}"
-                }))
-
-                if capture_requested:
-                    if len(faces) == 1 and len(face_encodings) == 1:
-                        # Store face data
-                        self.known_faces_encodings.append(face_encodings[0])
-                        self.known_faces_names.append(name)
-                        
-                        # Store coordinates
-                        if len(faces[0]) == 4:  # Haar Cascade
-                            coords = faces[0]
-                        else:  # YuNet
-                            coords = faces[0][:4]
-                        self.known_faces_coordinates.append(coords)
-                        
-                        # Save to file
-                        self.save_to_file()
-                        
-                        print(f"Face captured and saved for {name}")
-                        await websocket.send(json.dumps({
-                            "match": True,
-                            "name": name,
-                            "message": "Face successfully captured and saved"
-                        }))
-                        break
-                    else:
-                        await websocket.send(json.dumps({
-                            "error": "Please ensure exactly one face is visible"
-                        }))
-                    capture_requested = False
-
-                try:
-                    message = await asyncio.wait_for(websocket.recv(), timeout=0.1)
-                    data = json.loads(message)
-                    if data.get('command') == 'capture':
-                        capture_requested = True
-                except asyncio.TimeoutError:
-                    pass
-
-        finally:
-            video_capture.release()
 
     async def recognize_face_websocket(self, websocket, name):
         print(f"Starting face recognition for {name}...")
@@ -248,7 +158,7 @@ class FaceRecognition:
                     
                     if best_match_name == name:
                         consecutive_matches += 1
-                        if consecutive_matches >= 3:
+                        if consecutive_matches >= 10:  # Ensure multiple frames match
                             await websocket.send(json.dumps({
                                 "match": True,
                                 "name": name,
